@@ -1,4 +1,4 @@
-```markdown
+
 # Movie Recommender System
 
 This project is a **Movie Recommender System** built using **Streamlit**. The app uses a movie dataset to recommend similar movies based on a content-based filtering algorithm. Users can search for a movie, and the app will display its details along with recommendations for similar movies.
