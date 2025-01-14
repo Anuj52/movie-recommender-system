@@ -1,5 +1,3 @@
-Here is the full `README.md` file for your Movie Recommender System application:
-
 ```markdown
 # Movie Recommender System
 
@@ -130,7 +128,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- The datasets used are sourced from [The Movie Database (TMDb)](https://www.themoviedb.org/).
+- The datasets used are sourced from [The Movie Database (TMDb)]
 - The content-based filtering algorithm is based on movie metadata such as genres, keywords, and cast.
 - The **Streamlit** library was used for building the interactive web interface.
 
