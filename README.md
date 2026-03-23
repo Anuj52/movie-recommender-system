@@ -1,141 +1,124 @@
+# Movie Matchmaker
 
-# Movie Recommender System
-
-This project is a **Movie Recommender System** built using **Streamlit**. The app uses a movie dataset to recommend similar movies based on a content-based filtering algorithm. Users can search for a movie, and the app will display its details along with recommendations for similar movies.
+Movie Matchmaker is a Streamlit movie discovery app built on a content-based recommender. It helps users explore similar movies, search by actor or director, open trailers, save favorites to a watchlist, and browse curated mood collections.
 
 ## Features
 
-- **Search Movies**: Users can search for movies by title.
-- **Movie Details**: Displays movie information such as genres, overview, keywords, cast, and more.
-- **Movie Recommendations**: Recommends similar movies based on the selected movie.
-- **Interactive UI**: Simple, clean, and user-friendly interface built with Streamlit.
+- **Movie, actor, and director search** to anchor recommendations from different entry points.
+- **Rich movie profiles** with poster, overview, tagline, cast, director, runtime, year, rating, and trailer.
+- **Advanced filters** for genre, mood, language, vote count, rating, year range, runtime, and sort order.
+- **Similarity badges and explanations** so each match shows why it was recommended.
+- **Watchlist support** with local persistence and JSON download.
+- **Mood collections** for quick browsing across `Feel-Good`, `Action Night`, `Family Time`, and `Mind-Bending`.
+- **Deployment-ready setup** with Streamlit theme config and Python runtime pinning.
 
-## Technologies Used
+## Tech Stack
 
-- **Python** 3.x
-- **Streamlit** for building the web application
-- **Pandas** for data manipulation and analysis
-- **NumPy** for numerical operations
-- **Requests** for fetching movie posters from the API
-- **Pickle** for saving and loading preprocessed movie data and similarity matrices
+- **Python**
+- **Streamlit**
+- **Pandas**
+- **NumPy**
+- **Requests**
+- **scikit-learn**
 
-## Prerequisites
+## Setup
 
-Before running the app, you need to install the necessary dependencies. Ensure you have Python 3.x installed on your system.
-
-### Install Dependencies
-
-To set up the environment, run the following command:
+### 1. Install dependencies
 
 ```bash
-pip install pandas numpy requests streamlit
+python -m pip install -r requirements.txt
 ```
+
+### 2. Add your TMDb API key
+
+The app can read the TMDb key from any of these sources:
+
+- Local `.env` file:
+  `TMDB_API_KEY=YOUR_KEY`
+- Environment variable:
+  `TMDB_API_KEY`
+- Streamlit secrets:
+  `.streamlit/secrets.toml` with `TMDB_API_KEY = "YOUR_KEY"`
+
+If no API key is set, the app still works, but posters and trailers fall back to limited behavior.
+
+### 3. Run the app
+
+```bash
+python -m streamlit run app.py
+```
+
+The default local URL is:
+
+```text
+http://localhost:8501
+```
+
+## How It Works
+
+### Recommender
+
+- The app loads `movie_dict.pkl` and `similarity.pkl` when they are available.
+- If those files are missing, it rebuilds recommendation vectors from `tmdb_5000_movies.csv` and `tmdb_5000_credits.csv`.
+- Recommendations are based on content signals such as overview, genres, keywords, cast, and director.
+
+### Discovery Flow
+
+- Users can browse by **movie**, **actor**, or **director**.
+- The sidebar applies filters before ranking the recommendation list.
+- Results can be sorted by **similarity**, **rating**, **popularity**, or **newest**.
+
+### Watchlist
+
+- Saved movies are written to `watchlist.json`.
+- The file is ignored by git through `.gitignore`.
+- Users can also download the watchlist as a JSON export from inside the app.
 
 ## Project Structure
 
-The project structure should be as follows:
-
+```text
+/movie-recommender-system
+    /app.py
+    /requirements.txt
+    /.env
+    /.gitignore
+    /.streamlit/config.toml
+    /runtime.txt
+    /movie_dict.pkl
+    /similarity.pkl
+    /tmdb_5000_movies.csv
+    /tmdb_5000_credits.csv
+    /watchlist.json
+    README.md
 ```
-/Movie-Recommender-System
-    /venv/                  # Virtual environment (optional)
-    /app.py                 # Main Streamlit app file
-    /movie_dict.pkl         # Pickled file containing preprocessed movie data
-    /similarity.pkl         # Pickled file containing precomputed movie similarity matrix
-    /tmdb_5000_movies.csv   # Raw movie dataset
-    /tmdb_5000_credits.csv  # Raw movie credits dataset
-    README.md               # Project documentation (this file)
-```
 
-- **`app.py`**: The main file that runs the Streamlit app.
-- **`movie_dict.pkl`**: Pickle file storing processed movie data.
-- **`similarity.pkl`**: Pickle file storing the precomputed similarity matrix.
-- **`tmdb_5000_movies.csv`**: Raw dataset containing movie metadata.
-- **`tmdb_5000_credits.csv`**: Raw dataset containing movie credits (cast and crew).
+## Deployment
 
-## Steps to Run the Application
+### Streamlit Community Cloud
 
-### Step 1: Set Up the Virtual Environment
+1. Push the project to GitHub.
+2. Make sure `requirements.txt`, `.streamlit/config.toml`, and `runtime.txt` are included.
+3. In Streamlit Community Cloud, create a new app from the repository.
+4. Set `TMDB_API_KEY` in the app secrets.
+5. Use `app.py` as the entry file.
 
-1. Create and activate a virtual environment:
+### Notes for deployment
 
-   - On **Windows**:
-     ```bash
-     python -m venv venv
-     venv\Scripts\activate
-     ```
-
-   - On **macOS/Linux**:
-     ```bash
-     python3 -m venv venv
-     source venv/bin/activate
-     ```
-
-2. Install the required libraries:
-   ```bash
-   pip install pandas numpy requests streamlit
-   ```
-
-### Step 2: Prepare the Dataset
-
-1. Download the datasets (`tmdb_5000_movies.csv` and `tmdb_5000_credits.csv`).
-2. Use a Jupyter Notebook or Python script to preprocess the data by:
-   - Merging the datasets on the movie title.
-   - Handling missing values and duplicates.
-   - Extracting relevant columns (movie_id, title, overview, genres, keywords, cast, and crew).
-   - Saving the preprocessed movie data into `movie_dict.pkl` and the similarity matrix into `similarity.pkl`.
-
-### Step 3: Run the Streamlit Application
-
-1. Navigate to the project directory where `app.py` is located.
-2. Run the Streamlit app using the following command:
-
-   ```bash
-   streamlit run app.py
-   ```
-
-   This will start the app and open it in your browser at `http://localhost:8501`.
-
-### Step 4: Use the App
-
-1. **Search for a Movie**: Type the movie title in the search box.
-2. **View Movie Details**: The app will display the movie's genres, keywords, cast, and overview.
-3. **View Recommendations**: After selecting a movie, the app will recommend similar movies based on content-based filtering.
-
-## Code Explanation
-
-1. **Movie Data Processing**:
-   - Data is cleaned and preprocessed to handle missing values, remove duplicates, and convert certain columns (such as genres, keywords, and cast) into lists for easy handling.
-   - The movie dataset is merged with the credits data (cast and crew).
-
-2. **Similarity Calculation**:
-   - The app uses a **content-based filtering** approach by computing similarities between movies based on their metadata (genres, keywords, cast).
-   - Pre-computed similarity matrices are stored in a pickle file for fast retrieval.
-
-3. **Fetching Movie Posters**:
-   - The app fetches movie posters using the TMDb API, with error handling in case of a missing or incorrect poster.
-
-4. **Streamlit UI**:
-   - The app provides a simple interface to select a movie, view details, and get recommendations.
+- Local `.env` is for local development only and should not be committed.
+- `watchlist.json` is local server storage, so on hosted platforms it may be temporary or shared depending on the deployment setup.
+- For production-grade user accounts and private watchlists, the next step would be adding a real database.
 
 ## Troubleshooting
 
-- **Error: "Movie not found"**: If the selected movie is not found in the dataset, ensure that the movie title exists in the dataset or try another movie.
-- **Error: "No recommendations found"**: If no recommendations are shown, this might be due to the similarity calculation being limited or incorrect.
+- **`pip` launcher error on Windows**:
+  Use `python -m pip install -r requirements.txt` instead of `pip install -r requirements.txt`.
+- **No posters or trailers**:
+  Make sure `TMDB_API_KEY` is set correctly.
+- **Missing `similarity.pkl`**:
+  Install `scikit-learn` so the app can rebuild vectors from the CSV files.
+- **No recommendations after filtering**:
+  Lower the minimum rating or vote threshold, or widen the year/runtime range.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- The datasets used are sourced from [The Movie Database (TMDb)]
-- The content-based filtering algorithm is based on movie metadata such as genres, keywords, and cast.
-- The **Streamlit** library was used for building the interactive web interface.
-
-## Conclusion
-
-This Movie Recommender System is a simple, yet powerful way to suggest movies to users based on their preferences. The content-based filtering method can be expanded or modified to include additional features such as runtime, director, and more.
-
-```
-
-This `README.md` file provides a complete and detailed guide on how to set up, use, and understand the Movie Recommender System. You can adjust the file further depending on your specific needs or project changes.
+This project is licensed under the MIT License. See `LICENSE` for details.
