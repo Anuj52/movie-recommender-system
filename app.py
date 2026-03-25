@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import html
 import json
 import os
@@ -8,6 +9,7 @@ import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote, urlencode
 
 import numpy as np
 import pandas as pd
@@ -28,6 +30,7 @@ NO_IMAGE_URL = "https://via.placeholder.com/500x750?text=No+Image+Available"
 DEFAULT_RECOMMENDATIONS = 9
 DEFAULT_MIN_RATING = 6.0
 DEFAULT_MIN_VOTES = 200
+SECTION_OPTIONS = ["Recommendations", "Mood Collections", "Watchlist"]
 
 MOOD_RULES: dict[str, dict[str, Any]] = {
     "Feel-Good": {
@@ -83,57 +86,227 @@ except Exception:
 TMDB_API_KEY = TMDB_API_KEY or os.getenv("TMDB_API_KEY")
 
 
+def get_github_repo_url() -> str:
+    try:
+        configured = st.secrets.get("GITHUB_REPO_URL")
+    except Exception:
+        configured = None
+
+    configured = configured or os.getenv("GITHUB_REPO_URL")
+    if configured:
+        return str(configured)
+
+    git_config_path = APP_DIR / ".git" / "config"
+    if git_config_path.exists():
+        parser = configparser.ConfigParser()
+        parser.read(git_config_path, encoding="utf-8")
+        remote_section = 'remote "origin"'
+        if parser.has_section(remote_section):
+            url = parser.get(remote_section, "url", fallback="").strip()
+            if url.startswith("git@github.com:"):
+                return "https://github.com/" + url.split(":", 1)[1].removesuffix(".git")
+            if url:
+                return url.removesuffix(".git")
+
+    return "https://github.com"
+
+
+def get_app_base_url() -> str:
+    try:
+        configured = st.secrets.get("APP_URL")
+    except Exception:
+        configured = None
+
+    configured = configured or os.getenv("APP_URL")
+    if configured:
+        return str(configured).rstrip("/")
+
+    try:
+        context = getattr(st, "context", None)
+        headers = getattr(context, "headers", {}) if context else {}
+        host = headers.get("Host") or headers.get("host")
+        proto = headers.get("X-Forwarded-Proto") or headers.get("x-forwarded-proto") or "https"
+        if host:
+            return f"{proto}://{host}".rstrip("/")
+    except Exception:
+        pass
+
+    return ""
+
+
+def get_share_url() -> str:
+    base_url = get_app_base_url()
+    params: dict[str, str] = {}
+    panel = str(st.session_state.get("active_panel", "Recommendations"))
+    if panel in SECTION_OPTIONS and panel != "Recommendations":
+        params["panel"] = panel
+
+    selected_movie_id = st.session_state.get("selected_movie_id_for_share")
+    if selected_movie_id:
+        params["movie"] = str(selected_movie_id)
+
+    if not base_url:
+        return get_github_repo_url()
+
+    if not params:
+        return base_url
+
+    return base_url + "?" + urlencode(params)
+
+
+def sync_query_state(movie_id_to_index: dict[int, int]) -> None:
+    try:
+        panel = str(st.query_params.get("panel", "")).strip()
+        if panel in SECTION_OPTIONS:
+            st.session_state["active_panel"] = panel
+
+        movie_param = str(st.query_params.get("movie", "")).strip()
+        if movie_param.isdigit():
+            movie_id = int(movie_param)
+            if movie_id in movie_id_to_index:
+                st.session_state["browse_mode"] = "Movie"
+                st.session_state["selected_movie_index"] = movie_id_to_index[movie_id]
+    except Exception:
+        return
+
+
+def sync_query_params(selected_movie_id: int) -> None:
+    st.session_state["selected_movie_id_for_share"] = int(selected_movie_id)
+    try:
+        active_panel = str(st.session_state.get("active_panel", "Recommendations"))
+        if active_panel == "Recommendations":
+            st.query_params.clear()
+        else:
+            st.query_params["panel"] = active_panel
+        st.query_params["movie"] = str(int(selected_movie_id))
+    except Exception:
+        pass
+
+
 def inject_styles() -> None:
     st.markdown(
         """
         <style>
             .stApp {
                 background:
-                    radial-gradient(circle at top left, rgba(255, 218, 185, 0.35), transparent 28%),
-                    radial-gradient(circle at top right, rgba(173, 216, 230, 0.28), transparent 24%),
-                    linear-gradient(180deg, #f8fbff 0%, #fffaf2 100%);
+                    radial-gradient(circle at top right, rgba(212, 185, 143, 0.18), transparent 24%),
+                    linear-gradient(180deg, #f5efe3 0%, #f9f5ed 60%, #fcfaf5 100%);
+                color: #211912;
+                font-family: "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+            }
+            .block-container {
+                max-width: 1320px;
+                padding-top: 3.6rem;
+                padding-bottom: 2.5rem;
+            }
+            header[data-testid="stHeader"] {
+                background: rgba(245, 239, 227, 0.92);
+                backdrop-filter: blur(8px);
+            }
+            [data-testid="stSidebar"] {
+                background: linear-gradient(180deg, #2b333f 0%, #313a46 100%);
+                border-right: none;
+            }
+            [data-testid="stSidebar"] * {
+                color: #f3f5f8 !important;
+            }
+            [data-testid="stSidebar"] [data-baseweb="base-input"] > div,
+            [data-testid="stSidebar"] [data-baseweb="select"] > div,
+            [data-testid="stSidebar"] .stTextInput input,
+            [data-testid="stSidebar"] .stNumberInput input {
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                color: #ffffff;
+            }
+            [data-testid="stSidebar"] [data-baseweb="tag"] {
+                background: rgba(255, 255, 255, 0.1);
+                color: #ffffff;
+            }
+            [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] {
+                padding-top: 0.2rem;
+            }
+            h1, h2, h3, h4, h5, h6 {
+                color: #23180f !important;
+                font-family: "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif !important;
+                letter-spacing: -0.02em;
+            }
+            .topbar {
+                align-items: center;
+                background: linear-gradient(180deg, #252c36 0%, #1f2630 100%);
+                border-radius: 16px;
+                box-shadow: 0 12px 28px rgba(20, 24, 29, 0.2);
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 1.15rem;
+                overflow: hidden;
+                padding: 0.85rem 1.2rem;
+            }
+            .topbar-brand {
+                align-items: center;
+                color: #f9fafb;
+                display: flex;
+                font-size: 1.05rem;
+                font-weight: 600;
+                gap: 0.7rem;
+                min-width: 0;
+            }
+            .topbar-icon {
+                font-size: 1rem;
+            }
+            .topbar-actions {
+                color: #dbe1ea;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 1rem;
+                font-size: 0.95rem;
+                justify-content: flex-end;
+                padding-right: 4.5rem;
+            }
+            .topbar-actions a {
+                color: #dbe1ea !important;
+                text-decoration: none;
+            }
+            .topbar-actions a:hover {
+                text-decoration: underline;
+            }
+            .topbar-actions span {
+                opacity: 0.9;
             }
             .hero-card {
-                background: rgba(255, 255, 255, 0.82);
-                border: 1px solid rgba(40, 56, 89, 0.12);
-                border-radius: 24px;
-                box-shadow: 0 18px 42px rgba(40, 56, 89, 0.08);
-                padding: 1.35rem 1.45rem;
-                margin-bottom: 0.75rem;
+                margin-bottom: 0.4rem;
             }
             .eyebrow {
-                color: #a85c3a;
+                color: #3e3124;
                 font-size: 0.84rem;
-                font-weight: 700;
-                letter-spacing: 0.08em;
-                margin-bottom: 0.25rem;
-                text-transform: uppercase;
+                font-weight: 500;
+                margin-bottom: 0.4rem;
             }
             .hero-title {
-                color: #1d2b44;
-                font-family: "Palatino Linotype", "Book Antiqua", serif;
-                font-size: 2.15rem;
+                color: #2b1c0f;
+                font-family: Georgia, "Times New Roman", serif;
+                font-size: 3rem;
                 font-weight: 700;
                 line-height: 1.12;
                 margin: 0;
             }
             .hero-tagline {
-                color: #9a5e36;
-                font-style: italic;
+                color: #2f241b;
+                font-size: 1rem;
+                font-style: normal;
                 margin-top: 0.45rem;
                 margin-bottom: 0.85rem;
             }
             .hero-copy,
             .panel-copy {
-                color: #30435c;
+                color: #34281d;
                 font-size: 0.98rem;
-                line-height: 1.58;
-                margin: 0.75rem 0 0;
+                line-height: 1.6;
+                margin: 1rem 0 0;
             }
             .results-note {
-                color: #5f6f86;
-                margin-top: -0.15rem;
-                margin-bottom: 0.85rem;
+                color: #6e5d4b;
+                margin-top: 0.15rem;
+                margin-bottom: 1rem;
             }
             .token-row {
                 margin: 0.35rem 0 0.15rem;
@@ -141,52 +314,194 @@ def inject_styles() -> None:
             .token {
                 display: inline-block;
                 border-radius: 999px;
-                padding: 0.28rem 0.72rem;
+                padding: 0.33rem 0.72rem;
                 margin: 0 0.38rem 0.38rem 0;
-                font-size: 0.81rem;
-                font-weight: 600;
-                border: 1px solid transparent;
+                font-size: 0.8rem;
+                font-weight: 500;
+                border: 1px solid rgba(181, 163, 132, 0.2);
             }
             .token-chip {
-                background: #eef4ff;
-                border-color: rgba(41, 65, 95, 0.12);
-                color: #29415f;
+                background: #f2eadc;
+                color: #58462f;
             }
             .token-badge {
-                background: #fff4e9;
-                border-color: rgba(168, 92, 58, 0.16);
-                color: #8f5c31;
+                background: #efe3ce;
+                color: #5f4930;
             }
             .token-mood {
-                background: #edf9f4;
-                border-color: rgba(46, 117, 81, 0.14);
-                color: #2d7453;
-            }
-            .reason-box {
-                background: rgba(255, 248, 234, 0.92);
-                border: 1px solid rgba(168, 92, 58, 0.14);
-                border-radius: 18px;
-                color: #6b513a;
-                font-size: 0.92rem;
-                line-height: 1.45;
-                margin: 0.65rem 0;
-                padding: 0.8rem 0.9rem;
-                min-height: 4.8rem;
+                background: #e8efe9;
+                color: #355243;
             }
             .mini-title {
-                color: #1d2b44;
-                font-family: "Palatino Linotype", "Book Antiqua", serif;
-                font-size: 1.2rem;
-                font-weight: 700;
-                line-height: 1.2;
-                margin: 0.5rem 0 0.2rem;
+                color: #24180e;
+                font-size: 1.05rem;
+                font-weight: 600;
+                line-height: 1.3;
+                margin: 0.55rem 0 0.15rem;
             }
             .meta-line {
-                color: #5e6f86;
-                font-size: 0.91rem;
-                margin: 0.15rem 0 0.55rem;
+                color: #6a5948;
+                font-size: 0.85rem;
+                margin: 0.15rem 0 0.4rem;
+            }
+            .section-kicker {
+                color: #6e5d4b;
+                font-size: 0.92rem;
+                margin-top: -0.15rem;
+                margin-bottom: 1rem;
+            }
+            [data-testid="stImage"] img {
+                border-radius: 12px;
+                box-shadow: 0 8px 20px rgba(55, 39, 18, 0.16);
+            }
+            [data-testid="metric-container"] {
+                background: rgba(255, 250, 242, 0.88);
+                border: 1px solid rgba(191, 173, 143, 0.35);
+                border-radius: 12px;
+                padding: 0.35rem 0.65rem;
+                box-shadow: none;
+            }
+            .stat-grid {
+                display: grid;
+                gap: 0.65rem;
+                grid-template-columns: repeat(5, minmax(0, 1fr));
+                margin: 0.9rem 0 1rem;
+            }
+            .stat-card {
+                background: rgba(255, 250, 242, 0.88);
+                border: 1px solid rgba(191, 173, 143, 0.35);
+                border-radius: 12px;
+                padding: 0.7rem 0.85rem;
+            }
+            .stat-label {
+                color: #6a5948;
+                font-size: 0.86rem;
+                margin-bottom: 0.3rem;
+            }
+            .stat-value {
+                color: #24180e;
+                font-size: 1.15rem;
+                font-weight: 600;
+                line-height: 1.2;
+                white-space: nowrap;
+            }
+            .detail-stack {
+                color: #3e3024;
+                display: flex;
+                flex-direction: column;
+                gap: 0.35rem;
+                margin-top: 0.85rem;
+            }
+            .detail-item {
+                line-height: 1.45;
+            }
+            .detail-item strong {
+                color: #24180e;
+                font-weight: 600;
+            }
+            [data-testid="stButton"] > button,
+            [data-testid="stLinkButton"] a {
+                align-items: center;
+                background: linear-gradient(180deg, #363d47 0%, #262d37 100%);
+                border: 1px solid #252c35;
+                border-radius: 10px;
+                box-shadow: none;
+                color: #ffffff !important;
+                display: inline-flex;
+                font-weight: 500;
+                gap: 0.35rem;
+                justify-content: center;
+                min-height: 2.5rem;
+                padding: 0.55rem 0.9rem;
+                text-decoration: none !important;
+                transition: transform 0.16s ease, opacity 0.16s ease;
+            }
+            [data-testid="stButton"] > button:hover,
+            [data-testid="stLinkButton"] a:hover {
+                transform: translateY(-1px);
+            }
+            [data-testid="stButton"] > button[kind="secondary"] {
+                background: rgba(255, 250, 242, 0.9);
+                border: 1px solid rgba(191, 173, 143, 0.45);
+                color: #2d241c !important;
+            }
+            [data-testid="stLinkButton"] a p,
+            [data-testid="stButton"] > button p {
+                color: inherit !important;
+                font-weight: inherit;
+            }
+            [data-testid="stVerticalBlockBorderWrapper"] {
+                background: rgba(255, 251, 244, 0.92);
+                border: 1px solid rgba(193, 177, 150, 0.4);
+                border-radius: 18px;
+                box-shadow: 0 12px 30px rgba(74, 54, 25, 0.08);
+            }
+            [data-baseweb="tab-list"] {
+                gap: 0.5rem;
+            }
+            [data-baseweb="tab"] {
+                background: rgba(255, 249, 241, 0.72);
+                border-radius: 999px;
+                color: #5a4938 !important;
+                padding: 0.35rem 0.9rem;
+            }
+            [data-baseweb="tab"][aria-selected="true"] {
+                background: #2d3641;
+                color: #ffffff !important;
+            }
+            [data-testid="stPopover"] button {
+                background: transparent;
+                border: none;
+                box-shadow: none;
+                color: #5f4f3e !important;
+                min-height: auto;
+                padding: 0.1rem 0;
+                text-decoration: underline;
+            }
+            @media (max-width: 1200px) {
+                .topbar {
+                    gap: 0.8rem;
+                    padding-right: 1rem;
+                }
+                .topbar-actions {
+                    display: none;
+                }
+                .hero-title {
+                    font-size: 2.35rem;
+                }
+                .stat-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
             }
         </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_topbar() -> None:
+    github_url = get_github_repo_url()
+    share_url = get_share_url()
+    watchlist_url = "?panel=Watchlist"
+    share_href = (
+        "mailto:?subject="
+        + quote("Check out Movie Matchmaker")
+        + "&body="
+        + quote(f"Take a look at Movie Matchmaker: {share_url}")
+    )
+    st.markdown(
+        f"""
+        <div class='topbar'>
+            <div class='topbar-brand'>
+                <span class='topbar-icon'>MM</span>
+                <span>Movie Matchmaker</span>
+            </div>
+            <div class='topbar-actions'>
+                <a href="{html.escape(share_href, quote=True)}">Share</a>
+                <a href="{html.escape(github_url, quote=True)}" target="_blank">GitHub</a>
+                <a href="{html.escape(watchlist_url, quote=True)}">Watchlist</a>
+            </div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -307,6 +622,8 @@ def ensure_session_state(default_movie_index: int) -> None:
     st.session_state.setdefault("selected_director", "")
     st.session_state.setdefault("actor_anchor_index", int(default_movie_index))
     st.session_state.setdefault("director_anchor_index", int(default_movie_index))
+    st.session_state.setdefault("active_panel", "Recommendations")
+    st.session_state.setdefault("selected_movie_id_for_share", None)
 
 
 def toggle_watchlist(movie: pd.Series) -> None:
@@ -799,106 +1116,122 @@ def render_watchlist_button(movie: pd.Series, key: str, compact: bool = False) -
     movie_id = int(movie["movie_id"])
     label = "Saved" if is_in_watchlist(movie_id) else "Save"
     if not compact:
-        label = "Remove from watchlist" if is_in_watchlist(movie_id) else "Add to watchlist"
+        label = "In Watchlist" if is_in_watchlist(movie_id) else "Add to Watchlist"
 
     if st.button(label, key=key, use_container_width=True):
         toggle_watchlist(movie)
         safe_rerun()
 
 
-def render_selected_movie(movie: pd.Series) -> None:
-    poster_col, detail_col = st.columns([0.95, 1.45], gap="large")
+def render_trailer_button(movie_id: int, label: str = "Trailer", kind: str = "primary") -> None:
+    trailer_url = fetch_trailer_url(movie_id)
+    if not trailer_url:
+        st.caption("Trailer unavailable")
+        return
 
-    with poster_col:
-        st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
-        action_cols = st.columns(2)
-        with action_cols[0]:
-            render_watchlist_button(movie, key=f"selected_watch_{int(movie['movie_id'])}")
-        with action_cols[1]:
-            trailer_url = fetch_trailer_url(int(movie["movie_id"]))
-            if trailer_url:
-                st.markdown(f"[Watch trailer]({trailer_url})")
-            else:
-                st.caption("Trailer unavailable")
+    if hasattr(st, "link_button"):
+        try:
+            st.link_button(label, trailer_url, use_container_width=True, type=kind)
+        except TypeError:
+            st.link_button(label, trailer_url, use_container_width=True)
+    else:
+        st.markdown(f"[{label}]({trailer_url})")
 
-    with detail_col:
-        title = html.escape(movie["title"])
-        tagline = str(movie.get("tagline", "") or "").strip()
-        overview = html.escape(movie.get("overview", "") or "Overview not available.")
-        card_parts = [
-            "<div class='hero-card'>",
-            "<div class='eyebrow'>Selected Movie</div>",
-            f"<div class='hero-title'>{title}</div>",
-        ]
-        if tagline:
-            card_parts.append(f"<p class='hero-tagline'>{html.escape(tagline)}</p>")
-        card_parts.append(f"<p class='hero-copy'>{overview}</p>")
-        card_parts.append("</div>")
-        st.markdown("".join(card_parts), unsafe_allow_html=True)
 
-        metric_cols = st.columns(5)
-        metric_cols[0].metric("Release", format_year(movie.get("release_year")))
-        metric_cols[1].metric("Runtime", format_runtime(movie.get("runtime")))
-        metric_cols[2].metric(
+def render_stat_grid(movie: pd.Series) -> None:
+    stat_items = [
+        ("Release", format_year(movie.get("release_year"))),
+        ("Runtime", format_runtime(movie.get("runtime"))),
+        (
             "Rating",
             f"{float(movie['vote_average']):.1f}/10" if pd.notna(movie["vote_average"]) else "N/A",
-        )
-        metric_cols[3].metric(
-            "Votes",
-            f"{int(movie['vote_count']):,}" if pd.notna(movie["vote_count"]) else "N/A",
-        )
-        metric_cols[4].metric(
+        ),
+        ("Votes", f"{int(movie['vote_count']):,}" if pd.notna(movie["vote_count"]) else "N/A"),
+        (
             "Popularity",
             f"{int(round(float(movie['popularity']))):,}" if pd.notna(movie["popularity"]) else "N/A",
-        )
-
-        render_token_row(movie.get("genres"), variant="chip")
-        render_token_row(movie.get("moods"), variant="mood", max_items=4)
-
-        details: list[str] = []
-        director = str(movie.get("director", "") or "").strip()
-        if director:
-            details.append(f"Director: {director}")
-
-        cast = _coerce_name_list(movie.get("cast"))
-        if cast:
-            details.append("Cast: " + ", ".join(cast[:4]))
-
-        language = str(movie.get("original_language", "") or "").strip()
-        if language:
-            details.append(f"Language: {language}")
-
-        if details:
-            st.markdown(
-                "<p class='panel-copy'>" + html.escape(" | ".join(details)) + "</p>",
-                unsafe_allow_html=True,
-            )
-
-        trailer_url = fetch_trailer_url(int(movie["movie_id"]))
-        if trailer_url:
-            with st.expander("Play trailer"):
-                st.video(trailer_url)
+        ),
+    ]
+    cards = "".join(
+        "<div class='stat-card'>"
+        f"<div class='stat-label'>{html.escape(label)}</div>"
+        f"<div class='stat-value'>{html.escape(value)}</div>"
+        "</div>"
+        for label, value in stat_items
+    )
+    st.markdown(f"<div class='stat-grid'>{cards}</div>", unsafe_allow_html=True)
 
 
-def render_recommendation_card(recommendation: dict[str, Any]) -> None:
+def render_selected_movie(movie: pd.Series) -> None:
+    with st.container(border=True):
+        poster_col, detail_col = st.columns([0.9, 1.7], gap="large")
+
+        with poster_col:
+            st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
+
+        with detail_col:
+            title = html.escape(movie["title"])
+            tagline = str(movie.get("tagline", "") or "").strip()
+            overview = html.escape(movie.get("overview", "") or "Overview not available.")
+            card_parts = [
+                "<div class='hero-card'>",
+                "<div class='eyebrow'>Selected Movie</div>",
+                f"<div class='hero-title'>{title}</div>",
+            ]
+            if tagline:
+                card_parts.append(f"<p class='hero-tagline'>{html.escape(tagline)}</p>")
+            card_parts.append("</div>")
+            st.markdown("".join(card_parts), unsafe_allow_html=True)
+
+            render_stat_grid(movie)
+
+            st.markdown(f"<p class='hero-copy'>{overview}</p>", unsafe_allow_html=True)
+
+            action_cols = st.columns([1.05, 1.15, 2.8])
+            with action_cols[0]:
+                render_trailer_button(int(movie["movie_id"]), label="Play trailer")
+            with action_cols[1]:
+                render_watchlist_button(movie, key=f"selected_watch_{int(movie['movie_id'])}")
+
+            render_token_row(movie.get("genres"), variant="chip", max_items=5)
+            render_token_row(movie.get("moods"), variant="mood", max_items=4)
+
+            details: list[str] = []
+            director = str(movie.get("director", "") or "").strip()
+            if director:
+                details.append(f"Director: {director}")
+
+            cast = _coerce_name_list(movie.get("cast"))
+            if cast:
+                details.append("Cast: " + ", ".join(cast[:3]))
+
+            language = str(movie.get("original_language", "") or "").strip()
+            if language:
+                details.append(f"Language: {language}")
+
+            if details:
+                detail_rows = "".join(
+                    f"<div class='detail-item'><strong>{html.escape(item.split(':', 1)[0])}:</strong> {html.escape(item.split(':', 1)[1].strip())}</div>"
+                    for item in details
+                    if ":" in item
+                )
+                st.markdown(f"<div class='detail-stack'>{detail_rows}</div>", unsafe_allow_html=True)
+
+            trailer_url = fetch_trailer_url(int(movie["movie_id"]))
+            if trailer_url:
+                with st.expander("Open embedded trailer"):
+                    st.video(trailer_url)
+
+
+def render_recommendation_details(recommendation: dict[str, Any]) -> None:
     movie = recommendation["movie"]
     movie_id = int(movie["movie_id"])
-
-    st.image(fetch_poster(movie_id), use_container_width=True)
-    st.markdown(f"<div class='mini-title'>{html.escape(movie['title'])}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='meta-line'>{format_year(movie.get('release_year'))} | {format_runtime(movie.get('runtime'))} | Similarity {recommendation['score']:.3f}</div>",
-        unsafe_allow_html=True,
-    )
-    render_token_row(recommendation["badges"], variant="badge", max_items=4)
-    render_token_row(movie.get("genres"), variant="chip", max_items=4)
-    st.markdown(
-        f"<div class='reason-box'>{html.escape(recommendation['reason'])}</div>",
-        unsafe_allow_html=True,
-    )
     st.caption(format_rating(movie))
+    reason = recommendation.get("reason", "")
+    if reason:
+        st.write(reason)
 
-    short_overview = truncate_text(movie.get("overview"))
+    short_overview = truncate_text(movie.get("overview"), max_chars=130)
     if short_overview:
         st.write(short_overview)
 
@@ -906,11 +1239,26 @@ def render_recommendation_card(recommendation: dict[str, Any]) -> None:
     with action_cols[0]:
         render_watchlist_button(movie, key=f"rec_watch_{recommendation['rank']}_{movie_id}", compact=True)
     with action_cols[1]:
-        trailer_url = fetch_trailer_url(movie_id)
-        if trailer_url:
-            st.markdown(f"[Trailer]({trailer_url})")
-        else:
-            st.caption("No trailer")
+        render_trailer_button(movie_id, label="Trailer", kind="secondary")
+
+
+def render_recommendation_card(recommendation: dict[str, Any]) -> None:
+    movie = recommendation["movie"]
+    st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
+    st.markdown(f"<div class='mini-title'>{html.escape(movie['title'])}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='meta-line'>Runtime | {format_runtime(movie.get('runtime'))}</div>",
+        unsafe_allow_html=True,
+    )
+    render_token_row(movie.get("genres"), variant="chip", max_items=3)
+    render_token_row(recommendation["badges"], variant="badge", max_items=2)
+
+    if hasattr(st, "popover"):
+        with st.popover("Details"):
+            render_recommendation_details(recommendation)
+    else:
+        with st.expander("Details"):
+            render_recommendation_details(recommendation)
 
 
 def filter_candidate(
@@ -1142,6 +1490,10 @@ def get_top_mood_picks(movies_df: pd.DataFrame, mood: str, limit: int = 6) -> pd
 
 def render_mood_sections(movies_df: pd.DataFrame, movie_id_to_index: dict[int, int]) -> None:
     st.subheader("Mood Collections")
+    st.markdown(
+        "<p class='section-kicker'>Pick a vibe first, then jump straight into recommendations for one of the top titles.</p>",
+        unsafe_allow_html=True,
+    )
     mood_tabs = st.tabs(list(MOOD_RULES))
 
     for mood_name, tab in zip(MOOD_RULES, mood_tabs):
@@ -1155,26 +1507,27 @@ def render_mood_sections(movies_df: pd.DataFrame, movie_id_to_index: dict[int, i
             pick_columns = st.columns(3, gap="large")
             for column, (_, movie) in zip(pick_columns * 2, picks.iterrows()):
                 with column:
-                    st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
-                    st.markdown(
-                        f"<div class='mini-title'>{html.escape(movie['title'])}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"<div class='meta-line'>{format_year(movie.get('release_year'))} | {format_rating(movie)}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    short_overview = truncate_text(movie.get("overview"), max_chars=120)
-                    if short_overview:
-                        st.write(short_overview)
-                    if st.button(
-                        "Use for recommendations",
-                        key=f"mood_pick_{mood_name}_{int(movie['movie_id'])}",
-                        use_container_width=True,
-                    ):
-                        st.session_state["browse_mode"] = "Movie"
-                        st.session_state["selected_movie_index"] = movie_id_to_index[int(movie["movie_id"])]
-                        safe_rerun()
+                    with st.container(border=True):
+                        st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
+                        st.markdown(
+                            f"<div class='mini-title'>{html.escape(movie['title'])}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"<div class='meta-line'>{format_year(movie.get('release_year'))} | {format_rating(movie)}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        short_overview = truncate_text(movie.get("overview"), max_chars=120)
+                        if short_overview:
+                            st.write(short_overview)
+                        if st.button(
+                            "Use for recommendations",
+                            key=f"mood_pick_{mood_name}_{int(movie['movie_id'])}",
+                            use_container_width=True,
+                        ):
+                            st.session_state["browse_mode"] = "Movie"
+                            st.session_state["selected_movie_index"] = movie_id_to_index[int(movie["movie_id"])]
+                            safe_rerun()
 
 
 def render_watchlist_section(movies_df: pd.DataFrame) -> None:
@@ -1216,19 +1569,24 @@ def render_watchlist_section(movies_df: pd.DataFrame) -> None:
     repeated_columns = watchlist_columns * max(1, len(watchlist_movies))
     for column, (_, movie) in zip(repeated_columns, watchlist_movies.iterrows()):
         with column:
-            st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
-            st.markdown(f"<div class='mini-title'>{html.escape(movie['title'])}</div>", unsafe_allow_html=True)
-            st.markdown(
-                f"<div class='meta-line'>{format_year(movie.get('release_year'))} | {format_rating(movie)}</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button(
-                "Remove",
-                key=f"watchlist_remove_{int(movie['movie_id'])}",
-                use_container_width=True,
-            ):
-                toggle_watchlist(movie)
-                safe_rerun()
+            with st.container(border=True):
+                st.image(fetch_poster(int(movie["movie_id"])), use_container_width=True)
+                st.markdown(f"<div class='mini-title'>{html.escape(movie['title'])}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='meta-line'>{format_year(movie.get('release_year'))} | {format_rating(movie)}</div>",
+                    unsafe_allow_html=True,
+                )
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    if st.button(
+                        "Remove",
+                        key=f"watchlist_remove_{int(movie['movie_id'])}",
+                        use_container_width=True,
+                    ):
+                        toggle_watchlist(movie)
+                        safe_rerun()
+                with action_cols[1]:
+                    render_trailer_button(int(movie["movie_id"]), label="Trailer", kind="secondary")
 
 
 def render_recommendation_grid(recommendations: list[dict[str, Any]]) -> None:
@@ -1242,20 +1600,39 @@ def render_recommendation_grid(recommendations: list[dict[str, Any]]) -> None:
         st.warning("No movies matched the current filters. Try widening the year, runtime, or language range.")
         return
 
-    columns_per_row = 3
+    columns_per_row = min(5, max(1, len(recommendations)))
     for start in range(0, len(recommendations), columns_per_row):
-        columns = st.columns(columns_per_row, gap="large")
+        columns = st.columns(columns_per_row, gap="medium")
         for column, recommendation in zip(columns, recommendations[start : start + columns_per_row]):
             with column:
                 render_recommendation_card(recommendation)
 
 
+def render_panel_switcher() -> str:
+    if hasattr(st, "segmented_control"):
+        selected = st.segmented_control(
+            "Section",
+            options=SECTION_OPTIONS,
+            default=st.session_state.get("active_panel", "Recommendations"),
+            selection_mode="single",
+            label_visibility="collapsed",
+        )
+        if selected:
+            st.session_state["active_panel"] = selected
+    else:
+        st.radio(
+            "Section",
+            options=SECTION_OPTIONS,
+            key="active_panel",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+    return str(st.session_state.get("active_panel", "Recommendations"))
+
+
 def main() -> None:
     inject_styles()
-    st.title("Movie Matchmaker")
-    st.caption(
-        "Search by movie, actor, or director, tune the filters, save favorites, and browse mood-based collections."
-    )
 
     with st.spinner("Loading movie data..."):
         try:
@@ -1278,6 +1655,7 @@ def main() -> None:
         int(movie_id): int(index)
         for index, movie_id in movies["movie_id"].items()
     }
+    sync_query_state(movie_id_to_index)
 
     all_genres = sorted(
         {
@@ -1300,8 +1678,10 @@ def main() -> None:
             "Browse by",
             options=["Movie", "Actor", "Director"],
             key="browse_mode",
+            horizontal=True,
         )
         selected_index, context = resolve_selected_movie(movies, actor_map, director_map)
+        st.markdown("---")
 
         st.subheader("Tune the results")
         num_recommendations = st.slider(
@@ -1346,11 +1726,14 @@ def main() -> None:
             "Sort recommendations by",
             options=["Similarity", "Rating", "Popularity", "Newest"],
         )
+        st.markdown("---")
 
         st.subheader("Saved")
         st.metric("Watchlist items", len(st.session_state.get("watchlist_ids", set())))
 
     selected_movie = movies.iloc[int(selected_index)]
+    st.session_state["selected_movie_id_for_share"] = int(selected_movie["movie_id"])
+    render_topbar()
     if context:
         st.caption(context)
 
@@ -1371,17 +1754,14 @@ def main() -> None:
         sort_by=sort_by,
     )
 
-    recommendation_tab, mood_tab, watchlist_tab = st.tabs(
-        ["Recommendations", "Mood Collections", "Watchlist"]
-    )
+    active_panel = render_panel_switcher()
+    sync_query_params(int(selected_movie["movie_id"]))
 
-    with recommendation_tab:
+    if active_panel == "Recommendations":
         render_recommendation_grid(recommendations)
-
-    with mood_tab:
+    elif active_panel == "Mood Collections":
         render_mood_sections(movies, movie_id_to_index)
-
-    with watchlist_tab:
+    else:
         render_watchlist_section(movies)
 
 
