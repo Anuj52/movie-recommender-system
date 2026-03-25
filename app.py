@@ -6,6 +6,7 @@ import html
 import json
 import os
 import pickle
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +32,37 @@ DEFAULT_RECOMMENDATIONS = 9
 DEFAULT_MIN_RATING = 6.0
 DEFAULT_MIN_VOTES = 200
 SECTION_OPTIONS = ["Recommendations", "Mood Collections", "Watchlist"]
+RECOMMENDATION_TYPES = [
+    "Content-Based",
+    "Collaborative",
+    "Hybrid",
+    "Popularity-Based",
+]
+AGE_GROUP_GENRE_BOOSTS: dict[str, set[str]] = {
+    "All Ages": set(),
+    "Kids & Family": {"Animation", "Family", "Adventure", "Fantasy", "Comedy"},
+    "Teens": {"Adventure", "Action", "Fantasy", "Science Fiction", "Comedy"},
+    "Adults": {"Drama", "Thriller", "Crime", "Mystery", "War"},
+}
+AGE_GROUP_MOOD_BOOSTS: dict[str, set[str]] = {
+    "All Ages": set(),
+    "Kids & Family": {"Feel-Good", "Family Time"},
+    "Teens": {"Action Night", "Mind-Bending"},
+    "Adults": {"Mind-Bending", "Action Night"},
+}
+SEASONAL_GENRE_BOOSTS: dict[str, set[str]] = {
+    "Any": set(),
+    "Spring": {"Romance", "Comedy", "Music"},
+    "Summer": {"Adventure", "Action", "Family"},
+    "Autumn": {"Drama", "Mystery", "Fantasy"},
+    "Winter": {"Fantasy", "Family", "Drama"},
+}
+DAY_CONTEXT_MOOD_BOOSTS: dict[str, set[str]] = {
+    "Any Day": set(),
+    "Weekday": {"Feel-Good", "Mind-Bending"},
+    "Weekend": {"Action Night", "Family Time"},
+}
+HOLIDAY_GENRE_BOOSTS = {"Family", "Animation", "Romance", "Fantasy", "Comedy"}
 
 MOOD_RULES: dict[str, dict[str, Any]] = {
     "Feel-Good": {
@@ -624,6 +656,7 @@ def ensure_session_state(default_movie_index: int) -> None:
     st.session_state.setdefault("director_anchor_index", int(default_movie_index))
     st.session_state.setdefault("active_panel", "Recommendations")
     st.session_state.setdefault("selected_movie_id_for_share", None)
+    st.session_state.setdefault("interaction_history_ids", [])
 
 
 def toggle_watchlist(movie: pd.Series) -> None:
@@ -966,6 +999,162 @@ def number_or_zero(value: Any) -> float:
     if pd.isna(value):
         return 0.0
     return float(value)
+
+
+def normalize_scores(values: Any) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.size == 0:
+        return array
+    finite_mask = np.isfinite(array)
+    if not finite_mask.any():
+        return np.zeros_like(array, dtype=float)
+    finite_values = array[finite_mask]
+    minimum = float(finite_values.min())
+    maximum = float(finite_values.max())
+    if maximum - minimum < 1e-9:
+        return np.zeros_like(array, dtype=float)
+    normalized = (array - minimum) / (maximum - minimum)
+    normalized[~finite_mask] = 0.0
+    return normalized
+
+
+def update_interaction_history(movie_id: int) -> None:
+    history = [int(item) for item in st.session_state.get("interaction_history_ids", []) if str(item).isdigit()]
+    history = [item for item in history if item != int(movie_id)]
+    history.insert(0, int(movie_id))
+    st.session_state["interaction_history_ids"] = history[:8]
+
+
+def get_history_indices(
+    movie_id_to_index: dict[int, int],
+    selected_index: int,
+) -> list[int]:
+    history_ids = list(st.session_state.get("interaction_history_ids", []))
+    watchlist_ids = list(st.session_state.get("watchlist_ids", set()))
+    combined_ids = [
+        int(movie_id)
+        for movie_id in [*history_ids, *watchlist_ids]
+        if str(movie_id).isdigit() and int(movie_id) in movie_id_to_index
+    ]
+    unique_indices: list[int] = []
+    seen: set[int] = set()
+    for movie_id in combined_ids:
+        index = int(movie_id_to_index[int(movie_id)])
+        if index == int(selected_index) or index in seen:
+            continue
+        seen.add(index)
+        unique_indices.append(index)
+    return unique_indices
+
+
+def build_session_profile(movies_df: pd.DataFrame, history_indices: list[int]) -> dict[str, list[str]]:
+    genre_counter: Counter[str] = Counter()
+    mood_counter: Counter[str] = Counter()
+    language_counter: Counter[str] = Counter()
+
+    for history_index in history_indices:
+        movie = movies_df.iloc[int(history_index)]
+        genre_counter.update(_coerce_name_list(movie.get("genres"))[:3])
+        mood_counter.update(_coerce_name_list(movie.get("moods"))[:2])
+        language = str(movie.get("original_language", "") or "").strip().upper()
+        if language:
+            language_counter.update([language])
+
+    return {
+        "genres": [name for name, _ in genre_counter.most_common(3)],
+        "moods": [name for name, _ in mood_counter.most_common(2)],
+        "languages": [name for name, _ in language_counter.most_common(2)],
+    }
+
+
+def score_preference_alignment(
+    movie: pd.Series,
+    session_profile: dict[str, list[str]],
+    preferred_languages: list[str],
+    preferred_runtime: int,
+    age_group: str,
+    day_context: str,
+    season_context: str,
+    holiday_mode: bool,
+) -> float:
+    score = 0.0
+    genres = set(_coerce_name_list(movie.get("genres")))
+    moods = set(_coerce_name_list(movie.get("moods")))
+    language = str(movie.get("original_language", "") or "").strip().upper()
+    runtime = movie.get("runtime")
+
+    profile_genres = set(session_profile.get("genres", []))
+    profile_moods = set(session_profile.get("moods", []))
+    profile_languages = set(session_profile.get("languages", []))
+
+    if profile_genres:
+        score += 0.24 * len(genres.intersection(profile_genres))
+    if profile_moods:
+        score += 0.18 * len(moods.intersection(profile_moods))
+    if preferred_languages and language in preferred_languages:
+        score += 0.35
+    elif profile_languages and language in profile_languages:
+        score += 0.18
+
+    if pd.notna(runtime):
+        runtime_delta = abs(float(runtime) - float(preferred_runtime))
+        score += max(0.0, 1.0 - (runtime_delta / 100.0)) * 0.28
+
+    score += 0.12 * len(genres.intersection(AGE_GROUP_GENRE_BOOSTS.get(age_group, set())))
+    score += 0.12 * len(moods.intersection(AGE_GROUP_MOOD_BOOSTS.get(age_group, set())))
+    score += 0.1 * len(genres.intersection(SEASONAL_GENRE_BOOSTS.get(season_context, set())))
+    score += 0.12 * len(moods.intersection(DAY_CONTEXT_MOOD_BOOSTS.get(day_context, set())))
+
+    if holiday_mode:
+        score += 0.12 * len(genres.intersection(HOLIDAY_GENRE_BOOSTS))
+        if "Feel-Good" in moods or "Family Time" in moods:
+            score += 0.15
+
+    return float(score)
+
+
+def build_mode_reason(
+    mode: str,
+    selected_movie: pd.Series,
+    candidate_movie: pd.Series,
+    session_profile: dict[str, list[str]],
+    profile_score: float,
+) -> str:
+    if mode == "Content-Based":
+        return build_reason(selected_movie, candidate_movie)
+
+    if mode == "Popularity-Based":
+        return "Popular choice boosted by strong ratings, vote count, and your current filters."
+
+    if mode == "Collaborative":
+        genre_note = ", ".join(session_profile.get("genres", [])[:2])
+        if genre_note:
+            return f"Based on your saved and recent titles, you often lean toward {genre_note} movies."
+        return "Build up your watchlist or browse a few more titles to strengthen collaborative suggestions."
+
+    base_reason = build_reason(selected_movie, candidate_movie)
+    if profile_score > 0.6 and session_profile.get("moods"):
+        return base_reason + f" | Also fits your session mood: {session_profile['moods'][0]}."
+    return base_reason + " | Blended with popularity and session preference signals."
+
+
+def build_popularity_scores(movies_df: pd.DataFrame) -> np.ndarray:
+    weighted = (
+        movies_df["vote_average"].fillna(0) * 0.5
+        + np.log1p(movies_df["vote_count"].fillna(0)) * 0.25
+        + np.log1p(movies_df["popularity"].fillna(0)) * 0.25
+    )
+    return normalize_scores(weighted.to_numpy(dtype=float))
+
+
+def get_mode_description(mode: str) -> str:
+    descriptions = {
+        "Content-Based": "Uses genres, cast, director, keywords, and plot similarity to find movies like the one you selected.",
+        "Collaborative": "Uses your watchlist and recent browsing history as implicit preference signals to approximate collaborative suggestions.",
+        "Hybrid": "Blends content similarity, session history, and popularity for more balanced recommendations.",
+        "Popularity-Based": "Surfaces broadly popular, high-rated titles that still respect your active filters and profile.",
+    }
+    return descriptions.get(mode, "")
 
 
 def build_people_index(
@@ -1332,6 +1521,7 @@ def sort_recommendations(recommendations: list[dict[str, Any]], sort_by: str) ->
 def get_recommendations(
     movies_df: pd.DataFrame,
     model: RecommenderModel,
+    movie_id_to_index: dict[int, int],
     selected_index: int,
     limit: int,
     genre_filter: str,
@@ -1342,12 +1532,28 @@ def get_recommendations(
     runtime_range: tuple[int, int],
     languages: list[str],
     sort_by: str,
+    recommendation_mode: str,
+    preferred_runtime: int,
+    age_group: str,
+    day_context: str,
+    season_context: str,
+    holiday_mode: bool,
 ) -> list[dict[str, Any]]:
-    scores = get_similarity_scores(model, selected_index)
+    content_scores = normalize_scores(get_similarity_scores(model, selected_index))
     selected_movie = movies_df.iloc[int(selected_index)]
+    history_indices = get_history_indices(movie_id_to_index, selected_index)
+    session_profile = build_session_profile(movies_df, history_indices)
+    popularity_scores = build_popularity_scores(movies_df)
+
+    history_scores = np.zeros(len(movies_df), dtype=float)
+    if history_indices:
+        stacked_scores = np.vstack(
+            [normalize_scores(get_similarity_scores(model, history_index)) for history_index in history_indices]
+        )
+        history_scores = stacked_scores.mean(axis=0)
 
     recommendations: list[dict[str, Any]] = []
-    for candidate_index, score in enumerate(scores):
+    for candidate_index in range(len(movies_df)):
         if candidate_index == int(selected_index):
             continue
 
@@ -1364,12 +1570,44 @@ def get_recommendations(
         ):
             continue
 
+        profile_score = score_preference_alignment(
+            candidate_movie,
+            session_profile=session_profile,
+            preferred_languages=languages,
+            preferred_runtime=preferred_runtime,
+            age_group=age_group,
+            day_context=day_context,
+            season_context=season_context,
+            holiday_mode=holiday_mode,
+        )
+
+        if recommendation_mode == "Popularity-Based":
+            final_score = (0.8 * popularity_scores[candidate_index]) + (0.2 * profile_score)
+        elif recommendation_mode == "Collaborative":
+            final_score = (0.65 * history_scores[candidate_index]) + (0.2 * popularity_scores[candidate_index]) + (0.15 * profile_score)
+        elif recommendation_mode == "Hybrid":
+            final_score = (
+                0.5 * content_scores[candidate_index]
+                + 0.25 * history_scores[candidate_index]
+                + 0.15 * popularity_scores[candidate_index]
+                + 0.1 * profile_score
+            )
+        else:
+            final_score = (0.88 * content_scores[candidate_index]) + (0.12 * profile_score)
+
         recommendations.append(
             {
                 "movie": candidate_movie,
-                "score": float(score),
-                "reason": build_reason(selected_movie, candidate_movie),
+                "score": float(final_score),
+                "reason": build_mode_reason(
+                    recommendation_mode,
+                    selected_movie,
+                    candidate_movie,
+                    session_profile=session_profile,
+                    profile_score=profile_score,
+                ),
                 "badges": build_similarity_badges(selected_movie, candidate_movie),
+                "mode": recommendation_mode,
             }
         )
 
@@ -1683,6 +1921,46 @@ def main() -> None:
         selected_index, context = resolve_selected_movie(movies, actor_map, director_map)
         st.markdown("---")
 
+        st.subheader("Recommendation engine")
+        recommendation_mode = st.selectbox(
+            "Recommendation type",
+            options=RECOMMENDATION_TYPES,
+            index=2,
+        )
+        st.caption(get_mode_description(recommendation_mode))
+        age_group = st.selectbox(
+            "Age group",
+            options=["All Ages", "Kids & Family", "Teens", "Adults"],
+            index=0,
+        )
+        preferred_runtime = st.slider(
+            "Average viewing duration",
+            min_value=filter_bounds["runtime_min"],
+            max_value=filter_bounds["runtime_max"],
+            value=min(120, filter_bounds["runtime_max"]),
+            step=5,
+        )
+        day_context = st.selectbox(
+            "Day of the week context",
+            options=["Any Day", "Weekday", "Weekend"],
+            index=0,
+        )
+        season_context = st.selectbox(
+            "Season context",
+            options=["Any", "Spring", "Summer", "Autumn", "Winter"],
+            index=0,
+        )
+        holiday_mode = st.toggle("Holiday mood boost", value=False)
+        with st.expander("Recommendation system notes"):
+            st.markdown(
+                "- `Content-Based`: looks at movie metadata like genre, cast, director, and plot.\n"
+                "- `Collaborative`: uses your watchlist and recent browsing as implicit interaction signals.\n"
+                "- `Hybrid`: combines metadata, session history, and popularity.\n"
+                "- `Popularity-Based`: falls back to top-rated / widely watched movies.\n\n"
+                "The engine also adapts using language preferences, average viewing duration, and seasonal/day context."
+            )
+        st.markdown("---")
+
         st.subheader("Tune the results")
         num_recommendations = st.slider(
             "How many matches",
@@ -1732,16 +2010,19 @@ def main() -> None:
         st.metric("Watchlist items", len(st.session_state.get("watchlist_ids", set())))
 
     selected_movie = movies.iloc[int(selected_index)]
+    update_interaction_history(int(selected_movie["movie_id"]))
     st.session_state["selected_movie_id_for_share"] = int(selected_movie["movie_id"])
     render_topbar()
     if context:
         st.caption(context)
 
     render_selected_movie(selected_movie)
+    st.caption(f"{recommendation_mode} mode: {get_mode_description(recommendation_mode)}")
 
     recommendations = get_recommendations(
         movies_df=movies,
         model=model,
+        movie_id_to_index=movie_id_to_index,
         selected_index=int(selected_index),
         limit=int(num_recommendations),
         genre_filter=genre_filter,
@@ -1752,6 +2033,12 @@ def main() -> None:
         runtime_range=(int(runtime_range[0]), int(runtime_range[1])),
         languages=[language.upper() for language in selected_languages],
         sort_by=sort_by,
+        recommendation_mode=recommendation_mode,
+        preferred_runtime=int(preferred_runtime),
+        age_group=age_group,
+        day_context=day_context,
+        season_context=season_context,
+        holiday_mode=bool(holiday_mode),
     )
 
     active_panel = render_panel_switcher()
